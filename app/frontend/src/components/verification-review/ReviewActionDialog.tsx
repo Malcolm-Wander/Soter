@@ -8,6 +8,8 @@ import {
   useRejectVerification,
   useRequestResubmission,
 } from '@/hooks/useVerificationInbox';
+import { useToast } from '@/components/ToastProvider';
+import { normalizeError } from '@/lib/error-utils';
 
 type ActionType = 'approve' | 'reject' | 'resubmission';
 
@@ -70,6 +72,7 @@ export function ReviewActionDialog({
   const approve = useApproveVerification();
   const reject = useRejectVerification();
   const resubmit = useRequestResubmission();
+  const { toast } = useToast();
 
   const isPending = approve.isPending || reject.isPending || resubmit.isPending;
 
@@ -120,9 +123,13 @@ export function ReviewActionDialog({
       reset();
       onOpenChange(false);
     } catch (err) {
-      setError(
-        (err as Error).message ?? 'Something went wrong. Please try again.',
-      );
+      const normalized = normalizeError(err);
+      const inlineMsg = normalized.message ?? 'Something went wrong. Please try again.';
+      const toastMsg = normalized.correlationId
+        ? `${inlineMsg} (Correlation ID: ${normalized.correlationId})`
+        : inlineMsg;
+      setError(inlineMsg);
+      toast('Action failed', toastMsg, 'error');
     }
   }
 

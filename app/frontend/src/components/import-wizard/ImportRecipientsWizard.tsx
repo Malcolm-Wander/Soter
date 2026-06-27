@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useMemo, useRef, useState, useEffect } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronLeft, Download, FileSpreadsheet, RefreshCcw, UploadCloud } from 'lucide-react';
 import { useToast } from '@/components/ToastProvider';
+import { normalizeError } from '@/lib/error-utils';
 import {
   buildValidationReport,
   confirmRecipientsImport,
@@ -89,9 +90,12 @@ export function ImportRecipientsWizard({ campaignId }: ImportRecipientsWizardPro
       toast('CSV ready', `Loaded ${data.rows.length} recipient rows for review.`, 'success');
       announce(`CSV ready, ${data.rows.length} rows loaded.`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to parse the selected CSV file.';
-      setFileError(message);
-      toast('Upload problem', message, 'error');
+      const normalized = normalizeError(error);
+      const toastMsg = normalized.correlationId
+        ? `${normalized.message} (Correlation ID: ${normalized.correlationId})`
+        : normalized.message;
+      setFileError(normalized.message);
+      toast('Upload problem', toastMsg, 'error');
     } finally {
       setIsParsing(false);
     }
@@ -119,9 +123,12 @@ export function ImportRecipientsWizard({ campaignId }: ImportRecipientsWizardPro
         announce(`Validation complete. ${result.summary.validRows} valid row(s) ready to import.`);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to validate this import.';
-      setSubmitError(message);
-      toast('Validation failed', message, 'error');
+      const normalized = normalizeError(error);
+      const toastMsg = normalized.correlationId
+        ? `${normalized.message} (Correlation ID: ${normalized.correlationId})`
+        : normalized.message;
+      setSubmitError(normalized.message);
+      toast('Validation failed', toastMsg, 'error');
     } finally {
       setIsValidating(false);
     }
@@ -157,9 +164,12 @@ export function ImportRecipientsWizard({ campaignId }: ImportRecipientsWizardPro
       setSubmitMessage(message);
       toast('Import complete', message, 'success');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to complete import.';
-      setSubmitError(message);
-      toast('Import failed', message, 'error');
+      const normalized = normalizeError(error);
+      const toastMsg = normalized.correlationId
+        ? `${normalized.message} (Correlation ID: ${normalized.correlationId})`
+        : normalized.message;
+      setSubmitError(normalized.message);
+      toast('Import failed', toastMsg, 'error');
     } finally {
       setIsSubmitting(false);
     }
