@@ -9,6 +9,9 @@ import metrics
 import spacy
 from spacy.language import Language
 
+from config import settings
+from services.test_provider import TestProvider
+
 
 @dataclass
 class PIISpan:
@@ -25,6 +28,14 @@ class PIIScrubberService:
         "PERSON": "RECIPIENT_NAME",
         "LOCATION": "LOCATION",
         "DATE": "EVENT_DATE",
+        "EMAIL": "EMAIL_ADDRESS",
+        "PHONE": "PHONE_NUMBER",
+        "ID": "ID_NUMBER",
+    }
+
+    ALLOWLIST = {
+        "Soter", "Pulsefy", "Stellar", "Humanitarian", "Coordinator", 
+        "Manager", "Project", "Water", "Clear", "Crystal", "Coordinator"
     }
 
     DATE_REGEXES = [
@@ -40,14 +51,34 @@ class PIIScrubberService:
     ]
 
     LOCATION_REGEXES = [
-        r"\b(?:in|at|from|near)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}(?:\s+(?:Camp|State|Region|District|City|Village))?)\b",
+        r"\b(?:in|at|from|near)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}(?:\s+(?:Camp|State|Region|District|City|Village|Way|Island))?)\b",
+        r"\d+\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+(?:Way|Street|Avenue|Road|Island)\b",
+    ]
+
+    EMAIL_REGEXES = [
+        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
+    ]
+
+    PHONE_REGEXES = [
+        r"\+?\d{1,4}[-.\s]?\(?\d{1,3}?\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
+        r"\b0\d{10}\b",
+        r"\+234\s?\d{3}\s?\d{3}\s?\d{4}\b",
+    ]
+
+    ID_REGEXES = [
+        r"\b\d{11}\b",  # NIN (Nigeria)
+        r"\b[A-Z]{2}\d{8}\b",  # Voter ID
     ]
 
     def __init__(self):
         self.nlp = self._build_nlp()
+        self.test_provider = TestProvider()
 
     def anonymize(self, text: str) -> Dict[str, object]:
         """Return privacy-preserving anonymized text and summary metadata."""
+        if settings.test_provider_mode:
+            return self.test_provider.get_response("anonymize", {"text": text})
+
         start_time = time.time()
         try:
             if not text:
@@ -64,6 +95,9 @@ class PIIScrubberService:
             names = sum(1 for span in spans if span.label == "PERSON")
             locations = sum(1 for span in spans if span.label == "LOCATION")
             dates = sum(1 for span in spans if span.label == "DATE")
+            emails = sum(1 for span in spans if span.label == "EMAIL")
+            phones = sum(1 for span in spans if span.label == "PHONE")
+            ids = sum(1 for span in spans if span.label == "ID")
 
             return {
                 "original_length": len(text),
@@ -72,6 +106,9 @@ class PIIScrubberService:
                     "names": names,
                     "locations": locations,
                     "dates": dates,
+                    "emails": emails,
+                    "phones": phones,
+                    "ids": ids,
                     "total": len(spans),
                 },
                 "token_counts": token_counts,
@@ -151,7 +188,16 @@ class PIIScrubberService:
             spans.extend(self._spans_from_regex(text, pattern, "PERSON"))
 
         for pattern in self.LOCATION_REGEXES:
-            spans.extend(self._spans_from_regex(text, pattern, "LOCATION", capture_group=1))
+            spans.extend(self._spans_from_regex(text, pattern, "LOCATION")) # Removed capture group 1 to get full address if regex 2 matches
+
+        for pattern in self.EMAIL_REGEXES:
+            spans.extend(self._spans_from_regex(text, pattern, "EMAIL"))
+
+        for pattern in self.PHONE_REGEXES:
+            spans.extend(self._spans_from_regex(text, pattern, "PHONE"))
+
+        for pattern in self.ID_REGEXES:
+            spans.extend(self._spans_from_regex(text, pattern, "ID"))
 
         return self._dedupe_and_sort_spans(spans)
 
@@ -181,7 +227,13 @@ class PIIScrubberService:
         if not spans:
             return []
 
-        sorted_spans = sorted(spans, key=lambda span: (span.start, -(span.end - span.start)))
+        # Filter out spans that are in the allowlist
+        filtered_by_allowlist = [
+            span for span in spans 
+            if not any(word in self.ALLOWLIST for word in span.text.split())
+        ]
+
+        sorted_spans = sorted(filtered_by_allowlist, key=lambda span: (span.start, -(span.end - span.start)))
         filtered: List[PIISpan] = []
         current_end = -1
 
@@ -197,7 +249,7 @@ class PIIScrubberService:
         if not spans:
             return text, {}
 
-        counters: Dict[str, int] = {"PERSON": 0, "LOCATION": 0, "DATE": 0}
+        counters: Dict[str, int] = {k: 0 for k in self.TOKEN_BASE_BY_LABEL.keys()}
         token_counts: Dict[str, int] = {}
         chunks: List[str] = []
         cursor = 0

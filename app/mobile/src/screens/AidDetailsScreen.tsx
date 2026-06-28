@@ -19,14 +19,17 @@ import {
   getMockAidDetails,
 } from '../services/aidApi';
 import { useSync } from '../contexts/SyncContext';
+import { useSaverMode } from '../contexts/SaverModeContext';
+import { SaverModeBanner } from '../components/SaverModeBanner';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'AidDetails'>;
 
-export const AidDetailsScreen: React.FC<Props> = ({ route }) => {
+export const AidDetailsScreen: React.FC<Props> = ({ navigation, route }) => {
   const { aidId } = route.params;
   const { colors } = useTheme();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const { biometricEnabled, authenticate } = useBiometric();
+  const { active: saverModeActive, source: saverModeSource } = useSaverMode();
 
   // null = not yet attempted, true = granted, false = denied
   const [authState, setAuthState] = useState<'idle' | 'pending' | 'granted' | 'denied'>('idle');
@@ -97,6 +100,17 @@ export const AidDetailsScreen: React.FC<Props> = ({ route }) => {
     }
   }, [authState, loadDetails]);
 
+  // ── Periodic auto-refresh (normal mode only) ──────────────────────────────
+  // In normal mode, refresh every 30 s while the screen is focused.
+  // In saver mode this is disabled – the user must pull-to-refresh.
+  useEffect(() => {
+    if (authState !== 'granted' || saverModeActive) return;
+    const id = setInterval(() => {
+      void loadDetails(true);
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [authState, loadDetails, saverModeActive]);
+
   // Sync background effect
   useEffect(() => {
     if (!lastCompletedAction) {
@@ -158,8 +172,11 @@ export const AidDetailsScreen: React.FC<Props> = ({ route }) => {
       const result = await queueClaimConfirmation(aidId, details.claimId);
 
       if (result.status === 'completed') {
-        setSyncMessage('Claim confirmation submitted.');
-        await loadDetails(false);
+        setSyncMessage('Claim completed. Opening receipt.');
+        setDetails((current) =>
+          current ? { ...current, status: 'disbursed' } : current,
+        );
+        navigation.navigate('ClaimReceipt', { claimId: details.claimId });
       } else {
         setSyncMessage(
           isConnected
@@ -172,7 +189,7 @@ export const AidDetailsScreen: React.FC<Props> = ({ route }) => {
     } finally {
       setConfirming(false);
     }
-  }, [aidId, details, isConnected, loadDetails, queueClaimConfirmation]);
+  }, [aidId, details, isConnected, loadDetails, navigation, queueClaimConfirmation]);
 
   // ── Auth states ──────────────────────────────────────────────────────────
 
@@ -243,6 +260,9 @@ export const AidDetailsScreen: React.FC<Props> = ({ route }) => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      {/* ── Saver Mode Banner ──────────────────────────────────────────── */}
+      <SaverModeBanner visible={saverModeActive} source={saverModeSource} />
+
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <View style={styles.header}>
         <Text style={styles.title} accessibilityRole="header">
@@ -343,6 +363,15 @@ export const AidDetailsScreen: React.FC<Props> = ({ route }) => {
         </Text>
       </View>
 
+      {details.status === 'disbursed' ? (
+        <View style={styles.claimCompleteCard} accessibilityRole="status">
+          <Text style={styles.claimCompleteTitle}>Claim completed</Text>
+          <Text style={styles.claimCompleteText}>
+            This package has been disbursed. You can view your claim receipt now.
+          </Text>
+        </View>
+      ) : null}
+
       {/* ── Refresh Button ──────────────────────────────────────────────── */}
       <TouchableOpacity
         accessibilityRole="button"
@@ -376,19 +405,45 @@ export const AidDetailsScreen: React.FC<Props> = ({ route }) => {
         style={[
           styles.button,
           styles.secondaryButton,
-          confirming || hasPendingConfirmation ? styles.buttonDisabled : null,
+          confirming || hasPendingConfirmation || details.status === 'disbursed'
+            ? styles.buttonDisabled
+            : null,
         ]}
         onPress={handleConfirmClaim}
-        disabled={confirming || hasPendingConfirmation}
+        disabled={confirming || hasPendingConfirmation || details.status === 'disbursed'}
         activeOpacity={0.8}
       >
         {confirming ? (
           <ActivityIndicator size="small" color={colors.brand.primary} />
         ) : (
           <Text style={styles.secondaryButtonText}>
-            {hasPendingConfirmation ? 'Claim Confirmation Queued' : 'Confirm Claim'}
+            {hasPendingConfirmation
+              ? 'Claim Confirmation Queued'
+              : details.status === 'disbursed'
+              ? 'Claim Completed'
+              : 'Confirm Claim'}
           </Text>
         )}
+      </TouchableOpacity>
+
+      {details.status === 'disbursed' ? (
+        <TouchableOpacity
+          accessibilityRole="button"
+          style={[styles.button, { backgroundColor: colors.success }]}
+          onPress={() => navigation.navigate('ClaimReceipt', { claimId: details.claimId })}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.buttonText}>View Receipt</Text>
+        </TouchableOpacity>
+      ) : null}
+
+      <TouchableOpacity
+        accessibilityRole="button"
+        style={[styles.button, { backgroundColor: colors.success }]}
+        onPress={() => navigation.navigate('EvidenceUpload', { aidId })}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.buttonText}>Upload Evidence</Text>
       </TouchableOpacity>
 
       {lastUpdated ? (
@@ -736,6 +791,25 @@ const makeStyles = (colors: AppColors) =>
       color: colors.brand.primary,
       fontSize: 16,
       fontWeight: '700',
+    },
+    claimCompleteCard: {
+      backgroundColor: colors.successBg,
+      borderRadius: 12,
+      padding: 16,
+      borderWidth: 1,
+      borderColor: colors.successSoft,
+      marginBottom: 12,
+    },
+    claimCompleteTitle: {
+      fontSize: 16,
+      fontWeight: '700',
+      color: colors.success,
+      marginBottom: 4,
+    },
+    claimCompleteText: {
+      fontSize: 14,
+      color: colors.textSecondary,
+      lineHeight: 20,
     },
     lastUpdated: {
       fontSize: 12,

@@ -16,10 +16,12 @@ import {
   dispatchNetworkAction,
   flushPendingNetworkActions,
   getSyncQueueState,
+  retryFailedAction,
   subscribeToSyncQueue,
   subscribeToSyncSuccess,
 } from '../services/syncQueue';
 import { useNetworkStatus } from '../hooks/useNetworkStatus';
+import { useSaverMode } from './SaverModeContext';
 
 interface SyncContextValue extends SyncQueueState {
   isConnected: boolean;
@@ -44,6 +46,10 @@ interface SyncContextValue extends SyncQueueState {
   ) => Promise<
     { status: 'completed'; result: unknown } | { status: 'queued'; action: QueuedSyncAction }
   >;
+  queueClaimSubmission: (aidId: string, claimId: string, idempotencyKey: string) => Promise<
+    { status: 'completed'; result: unknown } | { status: 'queued'; action: QueuedSyncAction }
+  >;
+  retryAction: (actionId: string) => Promise<void>;
   getActionsForAid: (aidId: string) => QueuedSyncAction[];
 }
 
@@ -60,6 +66,8 @@ const defaultValue: SyncContextValue = {
   queueStatusRefresh: async () => ({ status: 'queued', action: {} as QueuedSyncAction }),
   queueClaimConfirmation: async () => ({ status: 'queued', action: {} as QueuedSyncAction }),
   queueEvidenceUpload: async () => ({ status: 'queued', action: {} as QueuedSyncAction }),
+  queueClaimSubmission: async () => ({ status: 'queued', action: {} as QueuedSyncAction }),
+  retryAction: async () => {},
   getActionsForAid: () => [],
 };
 
@@ -77,10 +85,11 @@ export const SyncProvider: React.FC<PropsWithChildren> = ({ children }) => {
     await flushPendingNetworkActions({ online: true });
   }, []);
   const { isConnected } = useNetworkStatus(handleReconnect);
+  const { active: saverModeActive } = useSaverMode();
 
   const flushNow = useCallback(async () => {
-    await flushPendingNetworkActions({ online: isConnected });
-  }, [isConnected]);
+    await flushPendingNetworkActions({ online: isConnected, saverMode: saverModeActive });
+  }, [isConnected, saverModeActive]);
 
   useEffect(() => {
     void getSyncQueueState().then(setSyncState);
@@ -99,18 +108,24 @@ export const SyncProvider: React.FC<PropsWithChildren> = ({ children }) => {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active' && isConnected) {
-        void flushNow();
+        // In saver mode, skip the automatic flush when returning to the app
+        // to reduce background data usage. The user can still pull-to-refresh.
+        if (!saverModeActive) {
+          void flushNow();
+        }
       }
     });
 
     return () => subscription.remove();
-  }, [flushNow, isConnected]);
+  }, [flushNow, isConnected, saverModeActive]);
 
   useEffect(() => {
-    if (isConnected) {
+    // In saver mode, don't auto-flush on mount/reconnect – let the user
+    // explicitly trigger refreshes to save data.
+    if (isConnected && !saverModeActive) {
       void flushNow();
     }
-  }, [flushNow, isConnected]);
+  }, [flushNow, isConnected, saverModeActive]);
 
   const value = useMemo<SyncContextValue>(() => {
     const pendingCount = syncState.items.filter((item) => item.state !== 'failed').length;
@@ -141,6 +156,15 @@ export const SyncProvider: React.FC<PropsWithChildren> = ({ children }) => {
           },
           { online: isConnected },
         ),
+      queueClaimSubmission: (aidId: string, claimId: string, idempotencyKey: string) =>
+        dispatchNetworkAction(
+          { type: 'claim-submission', payload: { aidId, claimId, idempotencyKey } },
+          { online: isConnected },
+        ),
+      retryAction: async (actionId: string) => {
+        await retryFailedAction(actionId);
+        await flushPendingNetworkActions({ online: isConnected, saverMode: saverModeActive });
+      },
       getActionsForAid: (aidId: string) =>
         syncState.items.filter((item) => {
           const payload = item.payload as { aidId?: string };

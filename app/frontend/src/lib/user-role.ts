@@ -1,4 +1,10 @@
-export const USER_ROLES = ['guest', 'client', 'operator', 'ngo', 'admin'] as const;
+export const USER_ROLES = [
+  'guest',
+  'client',
+  'operator',
+  'ngo',
+  'admin',
+] as const;
 
 export type UserRole = (typeof USER_ROLES)[number];
 
@@ -15,30 +21,30 @@ const CAMPAIGN_MANAGER_ROLES: readonly UserRole[] = ['ngo', 'admin'];
 const STAFF_ROLES: readonly UserRole[] = ['operator', 'admin'];
 
 const ROLE_LABELS: Record<UserRole, string> = {
-  guest: 'Guest',
-  client: 'Client',
-  operator: 'Operator',
-  ngo: 'NGO',
-  admin: 'Admin',
+  guest: 'roles.guest',
+  client: 'roles.client',
+  operator: 'roles.operator',
+  ngo: 'roles.ngo',
+  admin: 'roles.admin',
 };
 
 const NAVIGATION_ITEMS: readonly NavigationItem[] = [
   {
     href: '/',
-    label: 'Home',
-    description: 'Platform overview and aid highlights.',
+    label: 'navigation.home',
+    description: 'navigation.homeDescription',
     allowedRoles: ALL_NAVIGATION_ROLES,
   },
   {
     href: '/dashboard',
-    label: 'Dashboard',
-    description: 'Track aid packages and distribution activity.',
+    label: 'navigation.dashboard',
+    description: 'navigation.dashboardDescription',
     allowedRoles: ALL_NAVIGATION_ROLES,
   },
   {
     href: '/campaigns',
-    label: 'Campaigns',
-    description: 'Create and manage NGO funding campaigns.',
+    label: 'navigation.campaigns',
+    description: 'navigation.campaignsDescription',
     allowedRoles: CAMPAIGN_MANAGER_ROLES,
   },
   {
@@ -46,6 +52,10 @@ const NAVIGATION_ITEMS: readonly NavigationItem[] = [
     label: 'Review Queue',
     description: 'Review flagged verification cases.',
     allowedRoles: STAFF_ROLES,
+    href: '/verification-review',
+    label: 'navigation.verificationReview',
+    description: 'navigation.verificationReviewDescription',
+    allowedRoles: ['operator', 'admin'] as readonly UserRole[],
   },
 ];
 
@@ -61,7 +71,9 @@ export function normalizeUserRole(role?: string | null): UserRole {
     : DEFAULT_ROLE;
 }
 
-export function getUserRole(role = process.env.NEXT_PUBLIC_USER_ROLE): UserRole {
+export function getUserRole(
+  role = process.env.NEXT_PUBLIC_USER_ROLE,
+): UserRole {
   return normalizeUserRole(role);
 }
 

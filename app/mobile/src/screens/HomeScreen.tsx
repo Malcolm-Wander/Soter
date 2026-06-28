@@ -248,15 +248,26 @@ export const HomeScreen: React.FC<Props> = ({ navigation }) => {
           <TouchableOpacity
             style={styles.secondaryButton}
             accessibilityRole="button"
-            accessibilityLabel="View Aid Overview, coming soon"
-            accessibilityHint="This feature is not yet available"
-            onPress={() =>
-              Alert.alert('Coming Soon', 'Coming in a future wave')
-            }
+            accessibilityLabel="View Operator Task List"
+            accessibilityHint="Navigates to the Operator Task List screen"
+            onPress={() => navigation.navigate('TaskList')}
             activeOpacity={0.7}
           >
             <Text style={styles.secondaryButtonText}>
-              View Aid Overview (Coming Soon)
+              Operator Task List
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.secondaryButton}
+            accessibilityRole="button"
+            accessibilityLabel="View Submission Queue"
+            accessibilityHint="Navigates to the Submission Queue screen"
+            onPress={() => navigation.navigate('SubmissionQueue')}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.secondaryButtonText}>
+              Submission Queue
             </Text>
           </TouchableOpacity>
 
@@ -271,6 +282,17 @@ export const HomeScreen: React.FC<Props> = ({ navigation }) => {
             <Text style={styles.secondaryButtonText}>
               View Aid Details
             </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.primaryButton, { backgroundColor: colors.info }]}
+            accessibilityRole="button"
+            accessibilityLabel="NGO Bulk Scan Mode"
+            accessibilityHint="Opens the bulk scanner for repeated package processing"
+            onPress={() => navigation.navigate('BulkScanner')}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.primaryButtonText}>NGO Bulk Scan Mode</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>

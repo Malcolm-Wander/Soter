@@ -8,6 +8,8 @@ import {
 import { OnchainAdapter } from './onchain.adapter';
 import { MockOnchainAdapter } from './onchain.adapter.mock';
 import { SorobanAdapter } from './soroban.adapter';
+import { PrismaModule } from '../prisma/prisma.module';
+import { getQueueToken } from '@nestjs/bullmq';
 
 describe('OnchainModule', () => {
   let module: TestingModule;
@@ -19,9 +21,13 @@ describe('OnchainModule', () => {
         ConfigModule.forRoot({
           isGlobal: false,
         }),
+        PrismaModule,
         OnchainModule,
       ],
-    }).compile();
+    })
+      .overrideProvider(getQueueToken('soroban-transactions'))
+      .useValue({ add: jest.fn() })
+      .compile();
 
     _configService = module.get<ConfigService>(ConfigService);
   });

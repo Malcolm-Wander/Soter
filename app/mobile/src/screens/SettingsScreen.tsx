@@ -5,16 +5,50 @@ import {
   Switch,
   StyleSheet,
   Alert,
+  Linking,
+  Pressable,
+  ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../theme/ThemeContext';
 import { AppColors } from '../theme/useAppTheme';
 import { useBiometric } from '../contexts/BiometricContext';
+import { useNotification } from '../contexts/NotificationContext';
+import { useSaverMode } from '../contexts/SaverModeContext';
+import { config } from '../config';
+
+const STELLAR_LAB_FAUCET_URL = 'https://lab.stellar.org/account/fund';
+const STELLAR_FRIENDBOT_URL = 'https://friendbot-testnet.stellar.org';
 
 export const SettingsScreen: React.FC = () => {
   const { colors } = useTheme();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const { biometricEnabled, biometricSupported, toggleBiometric } = useBiometric();
+  const { permissionGranted, requestPermission } = useNotification();
+  const {
+    active: saverModeActive,
+    source: saverModeSource,
+    autoDetectEnabled,
+    toggleManual,
+    toggleAutoDetect,
+  } = useSaverMode();
+
+  const handleNotificationToggle = async (value: boolean) => {
+    if (value) {
+      const granted = await requestPermission();
+      if (!granted) {
+        Alert.alert(
+          'Permission Denied',
+          'Push notifications could not be enabled. Please check your device settings.',
+        );
+      }
+    } else {
+      Alert.alert(
+        'Disable Notifications',
+        'To disable push notifications, please turn them off in your device settings for Soter.',
+      );
+    }
+  };
 
   const handleToggle = async (value: boolean) => {
     if (value && !biometricSupported) {
@@ -27,9 +61,23 @@ export const SettingsScreen: React.FC = () => {
     await toggleBiometric(value);
   };
 
+  const openFaucetTool = async (url: string) => {
+    try {
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert(
+        'Unable to Open Link',
+        'Please try again or open the faucet from your browser.',
+      );
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.container}
+      >
         <Text
           style={styles.sectionHeader}
           accessibilityRole="header"
@@ -82,7 +130,154 @@ export const SettingsScreen: React.FC = () => {
             Biometrics are not available or not enrolled on this device.
           </Text>
         )}
-      </View>
+
+        <Text
+          style={styles.sectionHeader}
+          accessibilityRole="header"
+        >
+          Notifications
+        </Text>
+
+        <View
+          style={styles.row}
+          accessible
+          accessibilityRole="switch"
+          accessibilityLabel="Push Notifications"
+          accessibilityHint="Receive push notifications for claim and verification updates"
+          accessibilityValue={{ text: permissionGranted ? 'on' : 'off' }}
+          accessibilityState={{ checked: permissionGranted }}
+          onAccessibilityTap={() => void handleNotificationToggle(!permissionGranted)}
+        >
+          <View style={styles.rowText}>
+            <Text style={styles.rowTitle}>Push Notifications</Text>
+            <Text style={styles.rowSubtitle}>
+              Receive updates for claim and verification status changes
+            </Text>
+          </View>
+          <Switch
+            value={permissionGranted}
+            onValueChange={handleNotificationToggle}
+            trackColor={{ false: colors.border, true: colors.brand.primary }}
+            thumbColor="#FFFFFF"
+            importantForAccessibility="no-hide-descendants"
+            accessibilityElementsHidden
+          />
+        </View>
+
+        <Text
+          style={styles.sectionHeader}
+          accessibilityRole="header"
+        >
+          Data Saver
+        </Text>
+
+        {/* Saver Mode manual toggle */}
+        <View
+          style={styles.row}
+          accessible
+          accessibilityRole="switch"
+          accessibilityLabel="Saver Mode"
+          accessibilityHint="Reduce data usage by limiting polling, media previews, and background refresh"
+          accessibilityValue={{ text: saverModeActive ? 'on' : 'off' }}
+          accessibilityState={{ checked: saverModeActive }}
+          onAccessibilityTap={() => void toggleManual(!saverModeActive)}
+        >
+          <View style={styles.rowText}>
+            <Text style={styles.rowTitle}>Saver Mode</Text>
+            <Text style={styles.rowSubtitle}>
+              Reduce data usage by limiting refresh, media, and background sync
+            </Text>
+          </View>
+          <Switch
+            value={saverModeActive}
+            onValueChange={(v) => void toggleManual(v)}
+            trackColor={{ false: colors.border, true: colors.brand.primary }}
+            thumbColor="#FFFFFF"
+            importantForAccessibility="no-hide-descendants"
+            accessibilityElementsHidden
+          />
+        </View>
+
+        {saverModeActive && (
+          <Text style={styles.hint} accessibilityRole="alert">
+            {saverModeSource === 'auto'
+              ? 'Auto-enabled: slow or metered connection detected.'
+              : 'Manually enabled. Refresh, media previews, and background sync are reduced.'}
+          </Text>
+        )}
+
+        {/* Auto-detect toggle */}
+        <View
+          style={styles.row}
+          accessible
+          accessibilityRole="switch"
+          accessibilityLabel="Auto-detect poor connections"
+          accessibilityHint="Automatically enable Saver Mode on slow or metered connections"
+          accessibilityValue={{ text: autoDetectEnabled ? 'on' : 'off' }}
+          accessibilityState={{ checked: autoDetectEnabled }}
+          onAccessibilityTap={() => void toggleAutoDetect(!autoDetectEnabled)}
+        >
+          <View style={styles.rowText}>
+            <Text style={styles.rowTitle}>Auto-detect</Text>
+            <Text style={styles.rowSubtitle}>
+              Automatically enable Saver Mode on slow or metered connections
+            </Text>
+          </View>
+          <Switch
+            value={autoDetectEnabled}
+            onValueChange={(v) => void toggleAutoDetect(v)}
+            trackColor={{ false: colors.border, true: colors.brand.primary }}
+            thumbColor="#FFFFFF"
+            importantForAccessibility="no-hide-descendants"
+            accessibilityElementsHidden
+          />
+        </View>
+
+        {config.network === 'testnet' && (
+          <>
+            <Text
+              style={styles.sectionHeader}
+              accessibilityRole="header"
+            >
+              Get Testnet XLM
+            </Text>
+
+            <View style={styles.faucetPanel}>
+              <Text style={styles.faucetCopy}>
+                Fund demo accounts with free test XLM from Stellar.
+              </Text>
+
+              <View style={styles.linkGroup}>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.linkButton,
+                    pressed && styles.linkButtonPressed,
+                  ]}
+                  accessibilityRole="link"
+                  accessibilityLabel="Open Stellar Lab faucet"
+                  accessibilityHint="Opens the official Stellar Lab account funding tool"
+                  onPress={() => void openFaucetTool(STELLAR_LAB_FAUCET_URL)}
+                >
+                  <Text style={styles.linkButtonText}>Stellar Lab faucet</Text>
+                </Pressable>
+
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.secondaryLinkButton,
+                    pressed && styles.linkButtonPressed,
+                  ]}
+                  accessibilityRole="link"
+                  accessibilityLabel="Open Friendbot API"
+                  accessibilityHint="Opens the official Friendbot endpoint for testnet funding"
+                  onPress={() => void openFaucetTool(STELLAR_FRIENDBOT_URL)}
+                >
+                  <Text style={styles.secondaryLinkButtonText}>Friendbot API</Text>
+                </Pressable>
+              </View>
+            </View>
+          </>
+        )}
+      </ScrollView>
     </SafeAreaView>
   );
 };
@@ -93,9 +288,12 @@ const makeStyles = (colors: AppColors) =>
       flex: 1,
       backgroundColor: colors.background,
     },
-    container: {
+    scrollView: {
       flex: 1,
+    },
+    container: {
       padding: 24,
+      paddingBottom: 40,
     },
     sectionHeader: {
       fontSize: 13,
@@ -104,6 +302,7 @@ const makeStyles = (colors: AppColors) =>
       textTransform: 'uppercase',
       letterSpacing: 0.8,
       marginBottom: 8,
+      marginTop: 20,
     },
     row: {
       flexDirection: 'row',
@@ -136,5 +335,54 @@ const makeStyles = (colors: AppColors) =>
       fontSize: 13,
       color: colors.textSecondary,
       paddingHorizontal: 4,
+    },
+    faucetPanel: {
+      backgroundColor: colors.surface,
+      borderRadius: 14,
+      padding: 16,
+      borderWidth: 1,
+      borderColor: colors.border,
+      gap: 14,
+    },
+    faucetCopy: {
+      fontSize: 14,
+      color: colors.textSecondary,
+      lineHeight: 20,
+    },
+    linkGroup: {
+      gap: 10,
+    },
+    linkButton: {
+      minHeight: 44,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.brand.primary,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+    },
+    secondaryLinkButton: {
+      minHeight: 44,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.infoBg,
+      borderWidth: 1,
+      borderColor: colors.border,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+    },
+    linkButtonPressed: {
+      opacity: 0.78,
+    },
+    linkButtonText: {
+      color: '#FFFFFF',
+      fontSize: 15,
+      fontWeight: '700',
+    },
+    secondaryLinkButtonText: {
+      color: colors.info,
+      fontSize: 15,
+      fontWeight: '700',
     },
   });

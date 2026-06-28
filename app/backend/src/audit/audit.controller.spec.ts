@@ -24,7 +24,9 @@ describe('AuditController', () => {
   };
 
   const mockAuditService = {
-    findLogs: jest.fn().mockResolvedValue([]),
+    findLogs: jest
+      .fn()
+      .mockResolvedValue({ data: [], total: 0, page: 1, limit: 50 }),
     exportLogs: jest.fn().mockResolvedValue(mockExportResult),
     buildCsv: jest.fn().mockReturnValue('id,actorHash,...\nlog-1,...'),
   };
@@ -49,11 +51,18 @@ describe('AuditController', () => {
   });
 
   describe('getLogs', () => {
-    it('should call auditService.findLogs', async () => {
+    it('should call auditService.findLogs and set pagination headers', async () => {
       const query = { entity: 'campaign' };
-      await controller.getLogs(query);
-      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const res = {
+        setHeader: jest.fn(),
+      } as any;
+
+      await controller.getLogs(query as any, res);
+
       expect(service.findLogs).toHaveBeenCalledWith(query);
+      expect(res.setHeader).toHaveBeenCalledWith('X-Total-Count', '0');
+      expect(res.setHeader).toHaveBeenCalledWith('X-Page', '1');
+      expect(res.setHeader).toHaveBeenCalledWith('X-Limit', '50');
     });
   });
 
@@ -70,7 +79,7 @@ describe('AuditController', () => {
         { page: 1, limit: 10 },
         res as any,
       );
-      // eslint-disable-next-line @typescript-eslint/unbound-method
+
       expect(service.exportLogs).toHaveBeenCalledWith({ page: 1, limit: 10 });
       expect(returned).toBe(mockExportResult);
     });
@@ -81,7 +90,7 @@ describe('AuditController', () => {
         { format: 'csv' } as any,
         res as any,
       );
-      // eslint-disable-next-line @typescript-eslint/unbound-method
+
       expect(service.buildCsv).toHaveBeenCalledWith(mockExportResult.data);
       expect(res.setHeader).toHaveBeenCalledWith('Content-Type', 'text/csv');
       expect(typeof returned).toBe('string');
@@ -101,7 +110,7 @@ describe('AuditController', () => {
         { from: '2024-01-01', to: '2024-12-31' } as any,
         res as any,
       );
-      // eslint-disable-next-line @typescript-eslint/unbound-method
+
       expect(service.exportLogs).toHaveBeenCalledWith({
         from: '2024-01-01',
         to: '2024-12-31',

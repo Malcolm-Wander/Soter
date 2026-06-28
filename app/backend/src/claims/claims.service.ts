@@ -7,11 +7,18 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateClaimDto } from './dto/create-claim.dto';
 import { ClaimReceiptDto, SendReceiptShareDto } from './dto/claim-receipt.dto';
-import { ClaimStatus } from '@prisma/client';
+import { ExportClaimsQueryDto } from './dto/export-claims.dto';
+import {
+  ClaimStatus,
+  Prisma,
+  SorobanOperationType,
+  SorobanTransaction,
+} from '@prisma/client';
 import {
   OnchainAdapter,
   DisburseResult,
@@ -21,6 +28,29 @@ import { LoggerService } from '../logger/logger.service';
 import { MetricsService } from '../observability/metrics/metrics.service';
 import { AuditService } from '../audit/audit.service';
 import { EncryptionService } from '../common/encryption/encryption.service';
+import { BudgetService } from '../common/budget/budget.service';
+import { SorobanTransactionLifecycleService } from '../onchain/soroban-transaction-lifecycle.service';
+import { SorobanTransactionScheduler } from '../onchain/soroban-transaction.scheduler';
+
+type ExpirationCleanupCapableAdapter = OnchainAdapter & {
+  revokeAidPackage?: (params: {
+    packageId: string;
+    operatorAddress: string;
+  }) => Promise<{
+    transactionHash: string;
+    status: 'success' | 'failed';
+  }>;
+  refundAidPackage?: (params: {
+    packageId: string;
+    operatorAddress: string;
+  }) => Promise<{
+    transactionHash: string;
+    status: 'success' | 'failed';
+    amountRefunded?: string;
+  }>;
+};
+
+const DEFAULT_CLAIM_EXPIRY_DAYS = 30;
 
 @Injectable()
 export class ClaimsService {
@@ -37,6 +67,9 @@ export class ClaimsService {
     private readonly metricsService: MetricsService,
     private readonly auditService: AuditService,
     private readonly encryptionService: EncryptionService,
+    private readonly budgetService: BudgetService,
+    private readonly sorobanTransactionService: SorobanTransactionLifecycleService,
+    private readonly sorobanTransactionScheduler: SorobanTransactionScheduler,
   ) {
     this.onchainEnabled =
       this.configService.get<string>('ONCHAIN_ENABLED') === 'true';
@@ -51,6 +84,12 @@ export class ClaimsService {
       throw new NotFoundException('Campaign not found');
     }
 
+    // Enforce campaign funding cap
+    await this.budgetService.assertWithinBudget(
+      createClaimDto.campaignId,
+      createClaimDto.amount,
+    );
+
     const claim = await this.prisma.claim.create({
       data: {
         campaignId: createClaimDto.campaignId,
@@ -59,9 +98,11 @@ export class ClaimsService {
           createClaimDto.recipientRef,
         ),
         evidenceRef: createClaimDto.evidenceRef,
-        // Store tokenAddress in metadata for multi-token support
-        // Note: This would require a schema migration to add tokenAddress field
-        // For now, we pass it to on-chain operations directly
+        expiresAt:
+          createClaimDto.expiresAt ??
+          new Date(
+            Date.now() + DEFAULT_CLAIM_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
+          ),
       },
       include: {
         campaign: true,
@@ -96,12 +137,15 @@ export class ClaimsService {
   }
 
   async findOne(id: string) {
-    const claim = await this.prisma.claim.findUnique({
+    const claimResult = await this.prisma.claim.findUnique({
       where: { id },
       include: {
         campaign: true,
       },
     });
+    const claim = claimResult as
+      | (typeof claimResult & { deletedAt: Date | null })
+      | null;
     if (!claim || claim.deletedAt) {
       throw new NotFoundException('Claim not found');
     }
@@ -149,121 +193,80 @@ export class ClaimsService {
       );
     }
 
-    // Call on-chain adapter if enabled
-    let onchainResult: DisburseResult | null = null;
+    // Create Soroban transaction record with comprehensive lifecycle tracking
+    let sorobanTransaction: SorobanTransaction | undefined;
     if (this.onchainEnabled && this.onchainAdapter) {
-      const startTime = Date.now();
-      const adapterType =
-        this.configService.get<string>('ONCHAIN_ADAPTER')?.toLowerCase() ||
-        'mock';
+      const packageId = this.generateMockPackageId(id);
+      const tokenAddress = this.getTokenAddressForClaim(claim);
+      const correlationId = `disburse-${id}-${Date.now()}`;
 
-      try {
-        this.logger.log(`Calling on-chain adapter for claim ${id}`, {
+      // Create transaction record in database with full lifecycle support
+      sorobanTransaction =
+        await this.sorobanTransactionService.createTransaction({
           claimId: id,
-          adapter: adapterType,
-        });
-
-        // Generate a mock package ID for the disburse call
-        // In a real implementation, this would come from createClaim
-        const packageId = this.generateMockPackageId(id);
-
-        // Get tokenAddress from claim metadata or use a default
-        // In production, this should be stored in the claim record
-        const tokenAddress = this.getTokenAddressForClaim(claim);
-
-        onchainResult = await this.onchainAdapter.disburse({
-          claimId: id,
+          operation: SorobanOperationType.disburse_claim,
           packageId,
+          operatorAddress: 'admin', // In production, get from authenticated context
           recipientAddress: this.encryptionService.decrypt(claim.recipientRef),
           amount: claim.amount.toString(),
           tokenAddress,
+          correlationId,
+          metadata: {
+            campaignId: claim.campaignId,
+            claimAmount: claim.amount,
+            originalClaimStatus: claim.status,
+          },
+          maxAttempts: 5,
         });
 
-        const duration = (Date.now() - startTime) / 1000;
+      // Schedule for immediate execution with retry capabilities
+      await this.sorobanTransactionScheduler.scheduleTransaction(
+        sorobanTransaction.id,
+        {
+          correlationId,
+          priority: 1, // High priority for disbursements
+        },
+      );
 
-        // Record metrics
-        this.metricsService.incrementOnchainOperation(
-          'disburse',
-          adapterType,
-          onchainResult.status,
-        );
-        this.metricsService.recordOnchainDuration(
-          'disburse',
-          adapterType,
-          duration,
-        );
-
-        this.logger.log(`On-chain disbursement completed for claim ${id}`, {
+      this.logger.log(
+        'Created Soroban transaction with lifecycle tracking for claim disbursement',
+        {
           claimId: id,
-          transactionHash: onchainResult.transactionHash,
-          status: onchainResult.status,
-          duration,
-        });
+          transactionId: sorobanTransaction.id,
+          packageId,
+          correlationId,
+        },
+      );
 
-        // Audit log for on-chain operation
-        await this.auditService.record({
-          actorId: 'system',
-          entity: 'onchain',
-          entityId: id,
-          action: 'disburse',
-          metadata: {
-            transactionHash: onchainResult.transactionHash,
-            status: onchainResult.status,
-            amountDisbursed: onchainResult.amountDisbursed,
-            adapter: adapterType,
-          },
-        });
-      } catch (error) {
-        const duration = (Date.now() - startTime) / 1000;
-        const errorMessage =
-          error instanceof Error ? error.message : 'Unknown error';
-
-        this.logger.error(
-          `On-chain disbursement failed for claim ${id}: ${errorMessage}`,
-          error instanceof Error ? error.stack : undefined,
-          'ClaimsService',
-          { claimId: id, adapter: adapterType },
-        );
-
-        // Record failed metric
-        this.metricsService.incrementOnchainOperation(
-          'disburse',
-          adapterType,
-          'failed',
-        );
-        this.metricsService.recordOnchainDuration(
-          'disburse',
-          adapterType,
-          duration,
-        );
-
-        // Audit log for failed operation
-        await this.auditService.record({
-          actorId: 'system',
-          entity: 'onchain',
-          entityId: id,
-          action: 'disburse_failed',
-          metadata: {
-            error: errorMessage,
-            adapter: adapterType,
-          },
-        });
-
-        // Don't throw - allow disbursement to proceed even if on-chain call fails
-        // This is configurable behavior for resilience
-      }
+      // Emit metrics for transaction creation
+      this.metricsService.incrementCounter('soroban_disbursement_scheduled', {
+        claimId: id,
+        transactionId: sorobanTransaction.id,
+      });
     }
 
     // Proceed with status transition
     const claim = await this.transitionStatus(
+    // Update claim status to disbursed (optimistic update)
+    // The Soroban transaction will be processed asynchronously with full retry logic
+    const updatedClaim = await this.transitionStatus(
       id,
       ClaimStatus.approved,
       ClaimStatus.disbursed,
-      onchainResult,
     );
     // Track funnel stage metric
     this.metricsService.incrementFunnelStage('disbursed', claim.campaignId);
     return claim;
+
+    this.logger.log(
+      `Claim ${id} marked as disbursed with Soroban transaction tracking`,
+      {
+        claimId: id,
+        sorobanTransactionId: sorobanTransaction?.id,
+      },
+    );
+
+    return updatedClaim;
   }
 
   /**
@@ -271,7 +274,6 @@ export class ClaimsService {
    * In production, this would come from the createClaim on-chain call
    */
   private generateMockPackageId(claimId: string): string {
-    // Simple hash-based approach for mock
     const hash = createHash('sha256')
       .update(`package-${claimId}`)
       .digest('hex');
@@ -289,19 +291,13 @@ export class ClaimsService {
       campaign?: { metadata?: any } | null;
     } & Record<string, any>,
   ): string {
-    // Default USDC on Stellar testnet
-    // In production, this should come from the claim record or campaign config
     const defaultTokenAddress =
       'GATEMHCCKCY67ZUCKTROYN24ZYT5GK4EQZ5LKG3FZTSZ3NYNEJBBENSN';
-
-    // If claim has tokenAddress in metadata, use it
 
     const claimMetadata = claim.metadata as Record<string, unknown> | undefined;
     if (claimMetadata?.tokenAddress) {
       return claimMetadata.tokenAddress as string;
     }
-
-    // If campaign has tokenAddress in metadata, use it
 
     const campaignMetadata = claim.campaign?.metadata as
       | Record<string, unknown>
@@ -321,6 +317,116 @@ export class ClaimsService {
     );
   }
 
+  @Cron(CronExpression.EVERY_HOUR)
+  async handleExpiredClaimsCron(): Promise<void> {
+    try {
+      await this.cleanupExpiredClaims();
+    } catch (error) {
+      this.logger.error(
+        'Failed to clean up expired claims',
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
+  }
+
+  async cleanupExpiredClaims(now: Date = new Date()): Promise<{
+    processed: number;
+    archived: number;
+  }> {
+    const expiredClaims = await this.prisma.claim.findMany({
+      where: {
+        deletedAt: null,
+        status: {
+          in: [ClaimStatus.requested, ClaimStatus.verified],
+        },
+        expiresAt: {
+          lt: now,
+        },
+      },
+    });
+
+    if (expiredClaims.length === 0) {
+      this.logger.log('No expired claims found for cleanup');
+      return { processed: 0, archived: 0 };
+    }
+
+    let archived = 0;
+
+    for (const claim of expiredClaims) {
+      const onchainMetadata = await this.cleanupExpiredClaimOnchain(claim.id);
+
+      await this.prisma.claim.update({
+        where: { id: claim.id },
+        data: { status: ClaimStatus.archived },
+      });
+
+      await this.auditService.record({
+        actorId: 'system',
+        entity: 'claim',
+        entityId: claim.id,
+        action: 'expired_cleanup',
+        metadata: {
+          previousStatus: claim.status,
+          nextStatus: ClaimStatus.archived,
+          expiresAt: claim.expiresAt?.toISOString() ?? null,
+          onchain: onchainMetadata,
+        },
+      });
+
+      archived += 1;
+    }
+
+    this.logger.log(
+      `Expired claim cleanup completed: archived ${archived} claim(s)`,
+    );
+
+    return {
+      processed: expiredClaims.length,
+      archived,
+    };
+  }
+
+  private async cleanupExpiredClaimOnchain(claimId: string): Promise<{
+    attempted: boolean;
+    revoked?: string;
+    refunded?: string;
+    skippedReason?: string;
+  }> {
+    if (!this.onchainEnabled || !this.onchainAdapter) {
+      return {
+        attempted: false,
+        skippedReason: 'onchain_disabled',
+      };
+    }
+
+    const cleanupAdapter = this
+      .onchainAdapter as ExpirationCleanupCapableAdapter;
+
+    if (!cleanupAdapter.revokeAidPackage || !cleanupAdapter.refundAidPackage) {
+      return {
+        attempted: false,
+        skippedReason: 'adapter_missing_cleanup_methods',
+      };
+    }
+
+    const packageId = this.generateMockPackageId(claimId);
+
+    const revokeResult = await cleanupAdapter.revokeAidPackage({
+      packageId,
+      operatorAddress: 'system',
+    });
+    const refundResult = await cleanupAdapter.refundAidPackage({
+      packageId,
+      operatorAddress: 'system',
+    });
+
+    return {
+      attempted: true,
+      revoked: revokeResult.transactionHash,
+      refunded: refundResult.transactionHash,
+    };
+  }
+
   private async transitionStatus(
     id: string,
     fromStatus: ClaimStatus,
@@ -337,8 +443,6 @@ export class ClaimsService {
       );
     }
 
-    // For disburse, check budget? But for now, skip as per requirements.
-
     const updatedClaim = await this.prisma.$transaction(async tx => {
       const updated = await tx.claim.update({
         where: { id },
@@ -346,7 +450,6 @@ export class ClaimsService {
         include: { campaign: true },
       });
 
-      // Audit log for status change
       void this.auditLog('claim', id, `status_changed_to_${toStatus}`, {
         from: fromStatus,
         to: toStatus,
@@ -370,7 +473,6 @@ export class ClaimsService {
     action: string,
     metadata?: Record<string, unknown>,
   ) {
-    // Stub: In production, this would log to audit table or external system
     console.log(`Audit: ${entity} ${entityId} ${action}`, metadata);
   }
 
@@ -412,16 +514,12 @@ export class ClaimsService {
   }> {
     const receipt = await this.getReceipt(id);
 
-    // Generate receipt text
     const receiptText = this.generateReceiptText(receipt);
 
-    // Generate filename
     const filename = `claim-receipt-${receipt.claimId}.txt`;
 
-    // Base64 encode the receipt text
     const receiptData = Buffer.from(receiptText).toString('base64');
 
-    // Handle different sharing channels
     if (shareDto.channel === 'email' && shareDto.emailAddresses?.length) {
       this.sendReceiptViaEmail(
         shareDto.emailAddresses,
@@ -436,7 +534,6 @@ export class ClaimsService {
         shareDto.message ?? undefined,
       );
     }
-    // Audit log the share action
     void this.auditLog('claim', id, 'receipt_shared', {
       channel: shareDto.channel,
       emailCount: shareDto.emailAddresses?.length || 0,
@@ -502,8 +599,6 @@ export class ClaimsService {
       },
     );
 
-    // TODO: Integrate with email service (SendGrid, AWS SES, etc.)
-    // For now, this is a stub that logs the action
     for (const email of emailAddresses) {
       this.logger.debug(
         `[EMAIL STUB] Would send receipt to ${email}`,
@@ -529,11 +624,170 @@ export class ClaimsService {
       },
     );
 
-    // TODO: Integrate with SMS service (Twilio, AWS SNS, etc.)
-    // For now, this is a stub that logs the action
     const smsText = `Claim ${receipt.claimId} - Status: ${receipt.status} - Amount: ${receipt.amount} tokens`;
     for (const phone of phoneNumbers) {
       this.logger.debug(`[SMS STUB] Would send to ${phone}: ${smsText}`);
     }
+  }
+
+  async exportClaims(query: ExportClaimsQueryDto): Promise<{
+    data: Array<{
+      id: string;
+      campaignId: string;
+      campaignName: string;
+      status: string;
+      amount: number;
+      evidenceRef: string | null;
+      createdAt: Date;
+      updatedAt: Date;
+      cancelledAt: Date | null;
+      cancelledBy: string | null;
+      cancelReason: string | null;
+      reissuedFromId: string | null;
+      tokenAddress: string | null;
+    }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const page = Math.max(1, query.page ?? 1);
+    const limit = Math.min(200, Math.max(1, query.limit ?? 50));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.ClaimWhereInput = {
+      deletedAt: null,
+    };
+
+    if (query.status) where.status = query.status;
+    if (query.campaignId) where.campaignId = query.campaignId;
+
+    if (query.from || query.to) {
+      if (query.from && isNaN(Date.parse(query.from))) {
+        throw new BadRequestException(`Invalid 'from' date: ${query.from}`);
+      }
+      if (query.to && isNaN(Date.parse(query.to))) {
+        throw new BadRequestException(`Invalid 'to' date: ${query.to}`);
+      }
+      where.createdAt = {};
+      if (query.from) where.createdAt.gte = new Date(query.from);
+      if (query.to) where.createdAt.lte = new Date(query.to);
+    }
+
+    if (query.orgId) {
+      where.campaign = { orgId: query.orgId };
+    }
+
+    if (query.tokenAddress) {
+      where.OR = [
+        {
+          campaign: {
+            metadata: { path: 'tokenAddress', equals: query.tokenAddress },
+          },
+        },
+      ];
+    }
+
+    const [claimsResult, total] = await this.prisma.$transaction([
+      this.prisma.claim.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        include: { campaign: true },
+      }),
+      this.prisma.claim.count({ where }),
+    ]);
+
+    const claims = claimsResult as unknown as Array<{
+      id: string;
+      campaignId: string;
+      campaign: {
+        name: string;
+        metadata: unknown;
+      } | null;
+      status: ClaimStatus;
+      amount: number;
+      evidenceRef: string | null;
+      createdAt: Date;
+      updatedAt: Date;
+      deletedAt: Date | null;
+      cancelledAt: Date | null;
+      cancelledBy: string | null;
+      cancelReason: string | null;
+      reissuedFromId: string | null;
+      metadata: unknown;
+    }>;
+
+    const data = claims.map(c => {
+      const claimMetadata = c.metadata as Record<string, unknown> | undefined;
+      const campaignMetadata = c.campaign?.metadata as
+        | Record<string, unknown>
+        | undefined;
+
+      return {
+        id: c.id,
+        campaignId: c.campaignId,
+        campaignName: c.campaign?.name ?? '',
+        status: c.status,
+        amount: c.amount,
+        evidenceRef: c.evidenceRef ?? null,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        cancelledAt: c.cancelledAt ?? null,
+        cancelledBy: c.cancelledBy ?? null,
+        cancelReason: c.cancelReason ?? null,
+        reissuedFromId: c.reissuedFromId ?? null,
+        tokenAddress: (claimMetadata?.tokenAddress ??
+          campaignMetadata?.tokenAddress ??
+          null) as string | null,
+      };
+    });
+
+    return { data, total, page, limit };
+  }
+
+  buildCsv(
+    rows: Array<{
+      id: string;
+      campaignId: string;
+      campaignName: string;
+      status: string;
+      amount: number;
+      evidenceRef: string | null;
+      createdAt: Date;
+      updatedAt: Date;
+      cancelledAt: Date | null;
+      cancelledBy: string | null;
+      cancelReason: string | null;
+      reissuedFromId: string | null;
+      tokenAddress: string | null;
+    }>,
+  ): string {
+    const escape = (value: string | number | null): string => {
+      const str = String(value ?? '').replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const header =
+      'id,campaignId,campaignName,status,amount,evidenceRef,createdAt,updatedAt,cancelledAt,cancelledBy,cancelReason,reissuedFromId,tokenAddress';
+    const lines = rows.map(r =>
+      [
+        escape(r.id),
+        escape(r.campaignId),
+        escape(r.campaignName),
+        escape(r.status),
+        escape(r.amount.toFixed(2)),
+        escape(r.evidenceRef),
+        escape(r.createdAt.toISOString()),
+        escape(r.updatedAt.toISOString()),
+        escape(r.cancelledAt?.toISOString() ?? ''),
+        escape(r.cancelledBy),
+        escape(r.cancelReason),
+        escape(r.reissuedFromId),
+        escape(r.tokenAddress),
+      ].join(','),
+    );
+
+    return [header, ...lines].join('\r\n');
   }
 }

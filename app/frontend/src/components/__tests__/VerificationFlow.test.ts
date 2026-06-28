@@ -10,7 +10,11 @@
  * manual integration testing documented in the walkthrough.
  */
 
-import { detectPii, validateUploadForm } from '../VerificationFlow';
+jest.mock('next-intl', () => ({
+  useTranslations: () => () => '',
+}));
+
+import { detectPii, parseVerificationDraft, validateUploadForm } from '../VerificationFlow';
 
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
 
@@ -189,5 +193,49 @@ describe('detectPii', () => {
     it('returns detected: false for empty string', () => {
         const result = detectPii('');
         expect(result.detected).toBe(false);
+    });
+});
+
+describe('parseVerificationDraft', () => {
+    it('returns null for missing draft', () => {
+        expect(parseVerificationDraft(null)).toBeNull();
+    });
+
+    it('returns null for malformed JSON', () => {
+        expect(parseVerificationDraft('{bad-json')).toBeNull();
+    });
+
+    it('returns null for invalid shape', () => {
+        const draft = JSON.stringify({
+            textInput: 'Sample',
+            includeLocation: 'yes',
+            locationPermission: 'granted',
+            locationData: null,
+        });
+        expect(parseVerificationDraft(draft)).toBeNull();
+    });
+
+    it('parses a valid persisted draft', () => {
+        const draft = JSON.stringify({
+            textInput: 'Evidence details here',
+            includeLocation: true,
+            locationPermission: 'granted',
+            locationData: {
+                latitude: 12.34,
+                longitude: 56.78,
+                accuracy: 10,
+            },
+        });
+        const parsed = parseVerificationDraft(draft);
+        expect(parsed).toEqual({
+            textInput: 'Evidence details here',
+            includeLocation: true,
+            locationPermission: 'granted',
+            locationData: {
+                latitude: 12.34,
+                longitude: 56.78,
+                accuracy: 10,
+            },
+        });
     });
 });

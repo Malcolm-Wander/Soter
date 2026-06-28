@@ -18,6 +18,31 @@ interface Props {
   navigation: ScannerScreenNavigationProp;
 }
 
+export const parseAidIdFromQRCode = (data: string): string | null => {
+  const trimmed = data.trim();
+
+  const deepLinkRegex = /^soter:\/\/(?:testnet\/)?package\/([^\/?#]+)(?:[\/?#].*)?$/i;
+  const deepLinkMatch = trimmed.match(deepLinkRegex);
+  if (deepLinkMatch?.[1]) {
+    return decodeURIComponent(deepLinkMatch[1]);
+  }
+
+  try {
+    const url = new URL(trimmed);
+    const hostMatches = /(^|\.)soter\.app$/i.test(url.hostname);
+    if ((url.protocol === 'https:' || url.protocol === 'http:') && hostMatches) {
+      const pathMatch = url.pathname.match(/^\/(?:testnet\/)?package\/([^\/?#]+)(?:[\/?#].*)?$/i);
+      if (pathMatch?.[1]) {
+        return decodeURIComponent(pathMatch[1]);
+      }
+    }
+  } catch {
+    // invalid URL, fall through to null
+  }
+
+  return null;
+};
+
 export const ScannerScreen: React.FC<Props> = ({ navigation }) => {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [scanned, setScanned] = useState(false);
@@ -35,20 +60,18 @@ export const ScannerScreen: React.FC<Props> = ({ navigation }) => {
   const handleBarCodeScanned = ({ type, data }: { type: string; data: string }) => {
     setScanned(true);
 
-    // Check if it's the correct format: soter://package/{id}
-    const regex = /^soter:\/\/package\/(.+)$/;
-    const match = data.match(regex);
+    const aidId = parseAidIdFromQRCode(data);
 
-    if (match && match[1]) {
-      const aidId = match[1];
+    if (aidId) {
       navigation.replace('AidDetails', { aidId });
-    } else {
-      Alert.alert(
-        'Invalid QR Code',
-        'This QR code is not a valid Soter package link. Please scan a Soter QR code.',
-        [{ text: 'Try Again', onPress: () => setScanned(false) }],
-      );
+      return;
     }
+
+    Alert.alert(
+      'Invalid QR Code',
+      'This QR code is not a valid Soter package link. Please scan a Soter QR code.',
+      [{ text: 'Try Again', onPress: () => setScanned(false) }],
+    );
   };
 
   // ── Permission: requesting ───────────────────────────────────────────────
@@ -135,6 +158,18 @@ export const ScannerScreen: React.FC<Props> = ({ navigation }) => {
             onPress={() => navigation.goBack()}
           >
             <Text style={styles.cancelText}>Cancel</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.bulkModeButton, { borderColor: colors.brand.primary }]}
+            accessibilityRole="button"
+            accessibilityLabel="Switch to Bulk Mode"
+            accessibilityHint="Switch to a continuous scanning mode for multiple packages"
+            onPress={() => navigation.replace('BulkScanner')}
+          >
+            <Text style={[styles.bulkModeText, { color: colors.brand.primary }]}>
+              Switch to Bulk Mode
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -241,5 +276,17 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
+  },
+  bulkModeButton: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  bulkModeText: {
+    fontSize: 14,
+    fontWeight: '600',
   },
 });
