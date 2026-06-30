@@ -239,7 +239,6 @@ model Claim {
 
   balanceLedger  BalanceLedger[]
   reviewCase     ReviewCase?
-  balanceLedger     BalanceLedger[]
   sorobanTransactions SorobanTransaction[]
 
   @@index([status])
